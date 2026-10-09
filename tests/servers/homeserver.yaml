@@ -1,0 +1,60 @@
+# Test-only Synapse configuration: loopback federation uses a self-signed TLS certificate.
+# The harness replaces SERVER_NAME, CLIENT_PORT, FEDERATION_PORT and DATA_DIR.
+server_name: SERVER_NAME
+pid_file: DATA_DIR/homeserver.pid
+listeners:
+  - port: CLIENT_PORT
+    type: http
+    tls: false
+    bind_addresses: ['127.0.0.1']
+    resources:
+      - names: [client]
+  - port: FEDERATION_PORT
+    type: http
+    tls: true
+    bind_addresses: ['127.0.0.1']
+    resources:
+      - names: [federation]
+database:
+  name: sqlite3
+  args:
+    database: DATA_DIR/homeserver.db
+media_store_path: DATA_DIR/media
+signing_key_path: DATA_DIR/signing.key
+tls_certificate_path: DATA_DIR/cert.pem
+tls_private_key_path: DATA_DIR/key.pem
+federation_verify_certificates: false
+federation_ip_range_blacklist: []
+enable_registration: true
+enable_registration_without_verification: true
+report_stats: false
+macaroon_secret_key: integration-test-only-macaroon-secret
+form_secret: integration-test-only-form-secret
+suppress_key_server_warning: true
+trusted_key_servers: []
+rc_registration:
+  per_second: 1000
+  burst_count: 1000
+rc_message:
+  per_second: 1000
+  burst_count: 1000
+rc_invites:
+  per_room:
+    per_second: 1000
+    burst_count: 1000
+  per_user:
+    per_second: 1000
+    burst_count: 1000
+  per_issuer:
+    per_second: 1000
+    burst_count: 1000
+rc_login:
+  address:
+    per_second: 1000
+    burst_count: 1000
+  account:
+    per_second: 1000
+    burst_count: 1000
+  failed_attempts:
+    per_second: 1000
+    burst_count: 1000

@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check Rust function and complexity limits
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          metrics_archive="$RUNNER_TEMP/rust-code-analysis-linux-cli-x86_64.tar.gz"
+          metrics_hash="9ec2a217b8ff191e02dab5d5f2eee6158b63fd975c532b2c5d67c2e6c7249894"
+          gh release download v0.0.25 --repo mozilla/rust-code-analysis \
+            --pattern 'rust-code-analysis-linux-cli-x86_64.tar.gz' --dir "$RUNNER_TEMP"
+          echo "$metrics_hash  $metrics_archive" | sha256sum --check
+          tar -xzf "$metrics_archive" --directory "$RUNNER_TEMP"
+          PATH="$RUNNER_TEMP:$PATH" bash scripts/check-metrics.sh
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Unit and error-path tests
+        run: cargo test --locked
+      - name: Two-server federated migration
+        run: cargo test --locked --test federation -- --ignored --nocapture
+      - name: Audit dependency sources, licenses and advisories
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          audit_archive="$RUNNER_TEMP/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz"
+          gh release download 0.20.2 --repo EmbarkStudios/cargo-deny \
+            --pattern 'cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz' \
+            --dir "$RUNNER_TEMP"
+          audit_hash="9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+          echo "$audit_hash  $audit_archive" | sha256sum --check
+          tar -xzf "$audit_archive" --directory "$RUNNER_TEMP"
+          "$RUNNER_TEMP/cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny" check

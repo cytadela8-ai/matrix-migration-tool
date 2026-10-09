@@ -1,0 +1,7 @@
+/target/
+/.matrix-migration/
+/config.toml
+/.env
+/*.keys
+/migration-report.json
+/.worktrees/
