@@ -1,0 +1,19 @@
+store_passphrase_env = "MATRIX_STORE_PASSPHRASE"
+
+[from]
+homeserver = "https://matrix.old.example"
+user_id = "@alice:old.example"
+password_env = "MATRIX_FROM_PASSWORD"
+verification_device = "EXISTING_DEVICE_ID"
+# Optional alternatives/additions to pairing:
+# recovery_key_env = "MATRIX_FROM_RECOVERY_KEY"
+# import_keys = "/absolute/path/to/encrypted-room-keys.txt"
+# import_passphrase_env = "MATRIX_IMPORT_PASSPHRASE"
+
+[to]
+homeserver = "https://matrix.new.example"
+user_id = "@alice:new.example"
+password_env = "MATRIX_TO_PASSWORD"
+# Pairing/recovery also enables upload to an existing destination key backup.
+# verification_device = "EXISTING_DESTINATION_DEVICE_ID"
+# recovery_key_env = "MATRIX_TO_RECOVERY_KEY"
