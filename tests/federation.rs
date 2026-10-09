@@ -3,9 +3,13 @@
 
 #![recursion_limit = "256"]
 
+#[path = "federation/bulk.rs"]
+mod bulk;
+#[path = "federation/imports.rs"]
+mod imports;
 mod support;
 
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{path::Path, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use matrix_migration_tool::{
@@ -23,9 +27,8 @@ use matrix_sdk::{
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::{io::AsyncWriteExt, process::Command};
 
-use crate::support::{Server, bootstrap, create_room, save_config, state};
+use crate::support::{Server, bootstrap, create_room, migrate, save_config, state};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "starts two real Synapse containers and performs TLS federation"]
@@ -61,7 +64,7 @@ async fn migration_federates_recovers_keys_and_converges() -> Result<()> {
     to.recovery_key_env = Some("TEST_TO_RECOVERY".into());
     save_config(&work.path().join("config.toml"), &from, &to)?;
     let first =
-        migrate(work.path(), &recovery_from, &recovery_to).await.expect("Test operation failed");
+        migrate(work.path(), &recovery_from, &recovery_to, 2).await.expect("Test operation failed");
     assert_first(&first, &rooms).expect("First migration assertions");
     assert_additional(&first, &extra).expect("Additional room assertions");
     let to_user = target.user_id().context("No destination user")?.as_str();
@@ -77,7 +80,7 @@ async fn migration_federates_recovers_keys_and_converges() -> Result<()> {
     let before =
         state(&source, &rooms.shared, "m.room.power_levels").await.expect("Test operation failed");
     let second =
-        migrate(work.path(), &recovery_from, &recovery_to).await.expect("Test operation failed");
+        migrate(work.path(), &recovery_from, &recovery_to, 2).await.expect("Test operation failed");
     assert_converged(&first, &second, &rooms).expect("Rerun convergence assertions");
     assert_metadata(&source, &target, &rooms).await.expect("Test operation failed");
     assert_eq!(
@@ -347,45 +350,6 @@ fn emulate_verification(client: &Client) -> tokio::task::JoinHandle<()> {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
-}
-
-async fn migrate(directory: &Path, recovery_from: &str, recovery_to: &str) -> Result<Report> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_matrix-migration-tool"))
-        .arg("--config")
-        .arg(directory.join("config.toml"))
-        .arg("--state-dir")
-        .arg(directory.join("state"))
-        .args(["migrate", "--report"])
-        .arg(directory.join("report.json"))
-        .env("TEST_FROM_PASSWORD", support::PASSWORD)
-        .env("TEST_TO_PASSWORD", support::PASSWORD)
-        .env("TEST_STORE_PASSPHRASE", support::STORE_PASSPHRASE)
-        .env("TEST_FROM_RECOVERY", recovery_from)
-        .env("TEST_TO_RECOVERY", recovery_to)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .context("CLI stdin missing")?
-        .write_all(b"yes\n")
-        .await
-        .expect("Test operation failed");
-    let output = tokio::time::timeout(Duration::from_secs(240), child.wait_with_output())
-        .await
-        .context("Migration CLI timed out")??;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    ensure!(
-        output.status.code() == Some(2),
-        "Expected partial migration exit code 2, got {:?}: {stderr}",
-        output.status.code()
-    );
-    let report: Report = serde_json::from_slice(&std::fs::read(directory.join("report.json"))?)?;
-    ensure!(report.fatal.is_none(), "Fatal migration: {:?}\n{stderr}", report.fatal);
-    Ok(report)
 }
 
 fn assert_first(report: &Report, rooms: &Rooms) -> Result<()> {

@@ -86,7 +86,14 @@ async fn execute(cli: Cli) -> Result<u8> {
         Command::Init => unreachable!("init handled before reading config"),
         Command::Migrate { report } => migrate_command(&config, &cli.state_dir, &report).await,
         Command::ExportKeys { output, passphrase_env } => {
-            export_command(&config, &cli.state_dir, &output, &passphrase_env).await
+            let export = export_command(&config, &cli.state_dir, &output, &passphrase_env);
+            tokio::select! {
+                result = export => result,
+                signal = tokio::signal::ctrl_c() => {
+                    signal.context("Listen for interruption")?;
+                    anyhow::bail!("Export interrupted; rerun with the same config/state paths");
+                }
+            }
         }
     }
 }

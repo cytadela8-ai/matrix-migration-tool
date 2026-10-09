@@ -179,7 +179,7 @@ prek install
 prek run --all-files
 ```
 
-The integration test starts two digest-pinned Synapse 1.162.0 containers with dynamic loopback
+Each integration scenario starts two digest-pinned Synapse 1.162.0 containers with dynamic loopback
 ports and Docker host networking. Linux, Docker and OpenSSL are required. Self-signed TLS and
 disabled federation certificate checks are confined to test configuration. It creates users
 and encrypted rooms, emulates a SAS peer, recovers backups, migrates across servers, decrypts
@@ -188,6 +188,18 @@ verify device reuse and no repeated state/metadata writes. It also tests higher 
 power and immutable room-version 12 creators. Containers and data are temporary.
 Additional fixtures cover 105 paginated plaintext messages, missing historical keys,
 source invitations, insufficient invite power and repeated encrypted exports.
+
+Two larger scenarios each send 1,000 messages across five rooms: plaintext/shared,
+encrypted/shared, encrypted/world-readable with four rotated Megolm sessions,
+plaintext/joined, and encrypted/shared with four redacted messages. The destination is
+prejoined to the joined-only room in the successful case (exit 0); the failure case verifies
+exactly 200 inaccessible messages there (exit 2), with the other rooms complete. Both cases
+import source keys from an encrypted file, recover the destination backup, check exact audit
+counts, rerun without changing devices or repeating operations, and compare every accessible
+message body with its original. These ignored tests run through the federation command above.
+A separate scenario checks missing, malformed and incorrectly encrypted key imports, including
+partial reports and preservation of the supplied files.
+Pseudo-terminal tests interrupt both key-export password prompts and verify terminal restoration.
 
 CI runs formatting, clippy, unit tests, federation tests and dependency auditing. Dependencies
 are exactly pinned, with committed `Cargo.lock`. `deny.toml` documents a maintenance exception:

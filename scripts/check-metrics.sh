@@ -18,4 +18,4 @@ if [[ -n "$violations" ]]; then
   exit 1
 fi
 awk 'length($0) > 100 {print FILENAME ":" FNR ": exceeds 100 columns"; failed=1}
-  END {exit failed}' src/*.rs tests/*.rs tests/support/*.rs
+  END {exit failed}' src/**/*.rs tests/**/*.rs

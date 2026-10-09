@@ -10,13 +10,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use matrix_migration_tool::config::Config;
+use matrix_migration_tool::{config::Config, session};
 
 #[test]
 fn ctrl_c_at_account_prompt_exits_without_creating_configuration() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("config.toml");
-    let output = interrupt(&config, "Source Matrix ID", "");
+    let output = interrupt("init", &config, "Source Matrix ID", "");
     assert!(output.to_lowercase().contains("interrupted"), "Unexpected terminal output: {output}");
     assert!(!config.exists());
 }
@@ -31,24 +31,58 @@ fn hidden_input_is_not_echoed_and_ctrl_c_restores_terminal() {
     config.store_passphrase_env = None;
     let original = toml::to_string_pretty(&config).unwrap();
     std::fs::write(&path, &original).unwrap();
-    let output = interrupt(&path, "Local store passphrase:", "never-echo-test-secret");
+    let output = interrupt("init", &path, "Local store passphrase:", "never-echo-test-secret");
     assert!(!output.contains("never-echo-test-secret"));
     assert!(output.to_lowercase().contains("interrupted"), "Unexpected terminal output: {output}");
     assert!(output.contains(" echo "), "Terminal echo must be restored: {output}");
     assert_eq!(std::fs::read_to_string(path).unwrap(), original);
 }
 
-fn interrupt(config: &std::path::Path, stop: &str, secret: &str) -> String {
+#[test]
+fn export_interruptions_restore_terminal_and_release_state() {
+    for (store_prompt, stop) in
+        [(true, "Local store passphrase:"), (false, "Encrypted key export passphrase:")]
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config: Config = toml::from_str(include_str!("../config.toml.example")).unwrap();
+        if store_prompt {
+            config.store_passphrase_env = None;
+        }
+        let original = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let output = interrupt("export-keys", &path, stop, "never-echo-export-secret");
+        assert!(!output.contains("never-echo-export-secret"));
+        assert!(output.to_lowercase().contains("interrupted"), "{output}");
+        for setting in ["echo", "icanon", "isig"] {
+            assert!(
+                output.split_whitespace().any(|word| word == setting),
+                "Terminal setting {setting} was not restored: {output}"
+            );
+        }
+        assert!(!directory.path().join("destination.keys").exists());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+        session::lock_state(&directory.path().join("state")).unwrap();
+    }
+}
+
+fn interrupt(command: &str, config: &std::path::Path, stop: &str, secret: &str) -> String {
     let state = config.parent().unwrap().join("state");
     let mut child = Command::new("script")
         .args([
             "-qefc",
             concat!(
+                "if [ \"$MATRIX_TEST_COMMAND\" = init ]; then set -- init; ",
+                "else set -- export-keys --output \"$MATRIX_TEST_EXPORT\"; fi; ",
                 "\"$MATRIX_TEST_BINARY\" --config \"$MATRIX_TEST_CONFIG\" ",
-                "--state-dir \"$MATRIX_TEST_STATE\" init; status=$?; stty -a; exit $status"
+                "--state-dir \"$MATRIX_TEST_STATE\" \"$@\"; status=$?; stty -a; exit $status"
             ),
             "/dev/null",
         ])
+        .env("MATRIX_TEST_COMMAND", command)
+        .env("MATRIX_TEST_EXPORT", config.parent().unwrap().join("destination.keys"))
+        .env("MATRIX_STORE_PASSPHRASE", "test-store-passphrase")
+        .env_remove("MATRIX_EXPORT_PASSPHRASE")
         .env("MATRIX_TEST_BINARY", env!("CARGO_BIN_EXE_matrix-migration-tool"))
         .env("MATRIX_TEST_CONFIG", config)
         .env("MATRIX_TEST_STATE", state)
@@ -96,7 +130,7 @@ fn interrupt(config: &std::path::Path, stop: &str, secret: &str) -> String {
         }
         if Instant::now() >= deadline {
             child.kill().unwrap();
-            panic!("Ctrl-C did not stop setup promptly");
+            panic!("Ctrl-C did not stop the command promptly");
         }
         std::thread::sleep(Duration::from_millis(10));
     };

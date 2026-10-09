@@ -1,17 +1,24 @@
 //! Real Synapse instances federate over test-only self-signed TLS on dynamically allocated
 //! loopback ports. RAII stops only the Docker containers created by this harness.
 
-use std::{net::TcpListener, path::Path, process::Command, time::Duration};
+use std::{
+    net::TcpListener,
+    path::Path,
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use matrix_sdk::{Client, config::RequestConfig, reqwest, ruma::RoomId};
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::io::AsyncWriteExt;
 
-use matrix_migration_tool::{api::Api, config::Account};
+use matrix_migration_tool::{api::Api, config::Account, report::Report};
 
 pub const PASSWORD: &str = "integration-test-password";
 pub const STORE_PASSPHRASE: &str = "integration-test-store-passphrase";
+pub const IMPORT_PASSPHRASE: &str = "integration-test-import-passphrase";
 const IMAGE: &str = concat!(
     "matrixdotorg/synapse:v1.162.0@sha256:",
     "6b84a7bbac36f080b2d2e51e0289cf1b08b349598ea44a558df38d558f2c2311"
@@ -228,4 +235,59 @@ pub fn save_config(path: &Path, from: &Account, to: &Account) -> Result<()> {
     }
     std::fs::write(path, text)?;
     Ok(())
+}
+
+/// Run the migration CLI against the saved test config and check its exit status.
+///
+/// Args:
+///     directory: Fixture root containing config, state and report paths.
+///     recovery_from: Source recovery secret, unused for file-import fixtures.
+///     recovery_to: Destination recovery secret.
+///     expected_exit: Zero for complete migration, two for isolated operation failures.
+///
+/// Returns:
+///     The saved report, rejecting fatal errors or a mismatched CLI exit status.
+pub async fn migrate(
+    directory: &Path,
+    recovery_from: &str,
+    recovery_to: &str,
+    expected_exit: i32,
+) -> Result<Report> {
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_matrix-migration-tool"))
+        .arg("--config")
+        .arg(directory.join("config.toml"))
+        .arg("--state-dir")
+        .arg(directory.join("state"))
+        .args(["migrate", "--report"])
+        .arg(directory.join("report.json"))
+        .env("TEST_FROM_PASSWORD", PASSWORD)
+        .env("TEST_TO_PASSWORD", PASSWORD)
+        .env("TEST_STORE_PASSPHRASE", STORE_PASSPHRASE)
+        .env("TEST_IMPORT_PASSPHRASE", IMPORT_PASSPHRASE)
+        .env("TEST_FROM_RECOVERY", recovery_from)
+        .env("TEST_TO_RECOVERY", recovery_to)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .context("CLI stdin missing")?
+        .write_all(b"yes\n")
+        .await
+        .expect("Test operation failed");
+    let output = tokio::time::timeout(Duration::from_secs(600), child.wait_with_output())
+        .await
+        .context("Migration CLI timed out")??;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure!(
+        output.status.code() == Some(expected_exit),
+        "Expected migration exit code {expected_exit}, got {:?}: {stderr}",
+        output.status.code()
+    );
+    let report: Report = serde_json::from_slice(&std::fs::read(directory.join("report.json"))?)?;
+    ensure!(report.fatal.is_none(), "Fatal migration: {:?}\n{stderr}", report.fatal);
+    Ok(report)
 }
