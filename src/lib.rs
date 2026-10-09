@@ -4,11 +4,15 @@
 #![recursion_limit = "256"]
 
 pub mod api;
+pub mod browser;
+pub mod callback;
 pub mod config;
 pub mod crypto;
 pub mod history;
 pub mod migration;
 pub mod policy;
+pub mod prompt;
 pub mod report;
 pub mod session;
+pub mod setup;
 pub mod verification;

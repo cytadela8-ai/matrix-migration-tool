@@ -14,20 +14,20 @@ use zeroize::Zeroizing;
 pub struct Api {
     http: reqwest::Client,
     base: Url,
-    token: Zeroizing<String>,
+    client: Client,
 }
 
 impl Api {
     /// Create a bounded-time HTTP client from an authenticated SDK session.
     pub fn new(client: &Client) -> Result<Self> {
-        let token = client.access_token().context("Client is not authenticated")?;
+        client.access_token().context("Client is not authenticated")?;
         Ok(Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             base: client.homeserver(),
-            token: Zeroizing::new(token),
+            client: client.clone(),
         })
     }
 
@@ -55,8 +55,21 @@ impl Api {
         body: Option<&Value>,
     ) -> Result<Option<Value>> {
         let url = self.url(path, query)?;
+        let mut refreshed = false;
         for attempt in 0..4 {
             let (status, value) = self.send(&method, &url, body).await?;
+            if status == StatusCode::UNAUTHORIZED
+                && value["errcode"] == "M_UNKNOWN_TOKEN"
+                && !refreshed
+                && attempt < 3
+            {
+                self.client
+                    .refresh_access_token()
+                    .await
+                    .context("Refresh expired session; if revoked, authorize again with init")?;
+                refreshed = true;
+                continue;
+            }
             if status == StatusCode::TOO_MANY_REQUESTS && attempt < 3 {
                 let delay = value["retry_after_ms"].as_u64().unwrap_or(1000).min(30_000);
                 tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -94,8 +107,10 @@ impl Api {
         url: &Url,
         body: Option<&Value>,
     ) -> Result<(StatusCode, Value)> {
+        let token =
+            Zeroizing::new(self.client.access_token().context("Session has no access token")?);
         let mut request =
-            self.http.request(method.clone(), url.clone()).bearer_auth(self.token.as_str());
+            self.http.request(method.clone(), url.clone()).bearer_auth(token.as_str());
         if let Some(body) = body {
             request = request.json(body);
         }

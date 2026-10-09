@@ -8,18 +8,58 @@ messages from the destination account. Each source room receives an independent 
 ## Build and run
 
 The repository pins `nightly-2026-10-09` (Rust 1.101.0-nightly), including rustfmt and clippy.
-Both accounts must already exist; homeservers must support password login. Public servers
-require HTTPS; loopback HTTP is allowed for local testing.
+Both accounts must already exist. Public servers require HTTPS; loopback HTTP is allowed
+for local testing. Interactive setup requires OAuth or legacy SSO browser authentication.
 
 ```sh
 cargo build --locked --release
-cp config.toml.example config.toml
+./target/release/matrix-migration-tool init
+./target/release/matrix-migration-tool migrate --report migration-report.json
 ```
 
-Edit `config.toml` with full account IDs and homeserver URLs. Configuration contains names
-of environment variables. In Bash, read secrets without echoing or adding them to history:
+`init` runs in a local terminal on the same computer as your browser. On Unix, `stty`
+must be installed so terminal echo can be restored safely after interruption:
+
+1. Enter source and destination full Matrix IDs (`@user:server`). Homeservers are discovered;
+   enter a HTTPS server URL only if discovery fails. Confirm the direction and file locations.
+2. Enter and confirm a new local store passphrase in hidden prompts. Keep it for subsequent
+   runs; it is not an account password and cannot be recovered by this tool.
+3. Log into each account in your browser, including server-required SSO/MFA and authorization.
+   A temporary IPv4 localhost receiver gets the response automatically. Confirm the actual
+   account identity in the terminal. No passwords, access tokens or session keys are pasted
+   into the tool. If browser launch fails, open the displayed login URL on the same computer.
+4. For each account, select pairing and choose an existing device by its displayed name/number.
+   Keep that client online, accept verification, compare all seven emojis and explicitly type
+   `yes`. Alternatively, enter a recovery key in a hidden prompt or explicitly acknowledge
+   incomplete key access. Browser authentication alone does not unlock historical chat keys.
+
+The wizard creates `config.toml` automatically, with identities and selected pairing devices,
+but no secret values or password environment-variable setup. `migrate` and `export-keys` prompt
+for the local store passphrase. Setup only authenticates/verifies devices and writes local
+files: it never invites users, joins rooms or changes room metadata.
+
+A draft config is saved before login so interrupted setup can resume. Rerun `init` with the
+same config/state paths: valid sessions and verified devices are reused. Existing configs
+are never replaced with different accounts, and unexpected external edits are rejected.
+For an existing password/environment config, the wizard explicitly announces a switch to
+browser sessions and hidden store prompts before asking for confirmation. Existing devices,
+keys and optional environment-based recovery/import settings are retained.
+Malformed configs, wrong passphrases and revoked sessions fail visibly; preserve the original
+state, and use a new state directory if a fresh device is necessary. A mistakenly authenticated
+account is not saved, though the server may already have created its device.
+
+OAuth uses authorization code + PKCE and checked state; legacy SSO uses a random callback
+path. Callbacks expire after five minutes. OAuth failures are not silently downgraded to SSO
+or password login. Password-only servers cannot use browser setup; some OAuth servers require
+administrator approval for native-client registration. Remote/SSH callbacks and manually
+registered OAuth client IDs are not supported. Saved refresh tokens are managed automatically.
+
+For unattended/password-login workflows, the existing explicit environment configuration is
+still supported. Copy `config.toml.example`, edit the account IDs/server URLs, and read secrets
+without echoing or adding them to shell history:
 
 ```sh
+cp config.toml.example config.toml
 read -rsp 'Source password: ' MATRIX_FROM_PASSWORD; echo
 read -rsp 'Destination password: ' MATRIX_TO_PASSWORD; echo
 read -rsp 'New strong local store passphrase: ' MATRIX_STORE_PASSPHRASE; echo
@@ -30,7 +70,8 @@ export MATRIX_FROM_PASSWORD MATRIX_TO_PASSWORD MATRIX_STORE_PASSPHRASE
 Keep the same store passphrase and state directory for retries. The default is
 `.matrix-migration/`; select another with `--state-dir PATH`. A directory is bound to the
 two accounts. Restored sessions do not require password variables, but the store passphrase
-remains necessary. Exit codes: `0` for complete migration and history checks; `2` for a run
+remains necessary (hidden prompt for wizard configs, configured environment variable otherwise).
+Exit codes: `0` for complete migration and history checks; `2` for a run
 with reported room/preparation failures; `1` for a fatal setup/runtime error.
 
 ## Pairing and historical encryption keys
@@ -69,10 +110,11 @@ that backup. The tool never creates or replaces a server backup or cross-signing
 If no destination backup is enabled, import an encrypted export into your normal client:
 
 ```sh
-read -rsp 'Key export passphrase: ' MATRIX_EXPORT_PASSPHRASE; echo
-export MATRIX_EXPORT_PASSPHRASE
 ./target/release/matrix-migration-tool export-keys --output destination.keys
 ```
+
+The export passphrase is prompted without echo. Unattended exports can set
+`MATRIX_EXPORT_PASSPHRASE` (or the variable named by `--passphrase-env`).
 
 Keep the state directory until you verify decryption in your normal client. The source Olm
 account and cross-signing identity belong to another Matrix user and are not copied.
@@ -115,10 +157,12 @@ Reports are saved atomically and omit message bodies, tokens, passwords and keys
 ## Local storage
 
 SDK state and keys live in passphrase-encrypted SQLite stores. On Unix, directories are `0700`
-and session files `0600`. Session files contain access tokens protected by permissions,
+and session files `0600`. Session files contain access/refresh tokens and OAuth client IDs,
+protected by permissions,
 not store encryption; use an encrypted disk and protect state backups. Transient key files
 are encrypted, owner-only and removed after transfer. Owned secret buffers are zeroized on
-drop. Debug logging is opt-in with `RUST_LOG`; review SDK logs before sharing them. Git ignores
+drop (SDK token storage has its own lifecycle). Debug logging is opt-in with `RUST_LOG`;
+review SDK logs before sharing them. Git ignores
 local config, state, exports, reports and `.env`.
 
 ## Development
@@ -129,7 +173,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked
 cargo test --locked --test federation -- --ignored --nocapture
 cargo deny check
-# Install rust-code-analysis-cli 0.0.25 to run the same metrics guardrail as CI:
+# Install rust-code-analysis-cli 0.0.25 for the same parameter/source-width checks as CI:
 bash scripts/check-metrics.sh
 prek install
 prek run --all-files

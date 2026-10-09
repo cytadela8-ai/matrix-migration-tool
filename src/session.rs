@@ -11,7 +11,11 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use matrix_sdk::{
     Client,
-    authentication::matrix::MatrixSession,
+    authentication::{
+        AuthSession, SessionTokens,
+        matrix::MatrixSession,
+        oauth::{OAuthSession, UserSession},
+    },
     config::{RequestConfig, SyncSettings},
 };
 use serde::{Deserialize, Serialize};
@@ -26,7 +30,41 @@ use crate::{
 #[derive(Deserialize, Serialize)]
 struct SavedSession {
     homeserver: String,
-    session: MatrixSession,
+    session: SavedAuthentication,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum SavedAuthentication {
+    Matrix(MatrixSession),
+    Oauth { client_id: String, user: UserSession },
+}
+
+impl SavedAuthentication {
+    fn user_id(&self) -> &str {
+        match self {
+            Self::Matrix(session) => session.meta.user_id.as_str(),
+            Self::Oauth { user, .. } => user.meta.user_id.as_str(),
+        }
+    }
+
+    fn tokens(self) -> SessionTokens {
+        match self {
+            Self::Matrix(session) => session.tokens,
+            Self::Oauth { user, .. } => user.tokens,
+        }
+    }
+
+    fn into_session(self) -> AuthSession {
+        match self {
+            Self::Matrix(session) => session.into(),
+            Self::Oauth { client_id, user } => OAuthSession {
+                client_id: matrix_sdk::authentication::oauth::ClientId::new(client_id),
+                user,
+            }
+            .into(),
+        }
+    }
 }
 
 pub struct SyncTask(JoinHandle<matrix_sdk::Result<()>>);
@@ -111,13 +149,13 @@ pub async fn login(account: &Account, directory: &Path, passphrase: &str) -> Res
     let saved = read_saved(account, &session_path)?;
     let client = Client::builder()
         .homeserver_url(&account.homeserver)
+        .handle_refresh_tokens()
         .sqlite_store(directory.join("store"), Some(passphrase))
         .request_config(RequestConfig::new().timeout(Duration::from_secs(60)).retry_limit(3))
         .build()
         .await
         .context("Open encrypted Matrix store; check store passphrase and homeserver")?;
     authenticate(&client, account, &session_path, saved).await?;
-    validate_identity(&client, account).await?;
     Ok(client)
 }
 
@@ -128,8 +166,7 @@ fn read_saved(account: &Account, path: &Path) -> Result<Option<SavedSession>> {
     let saved: SavedSession = serde_json::from_slice(&fs::read(path)?)
         .context("Read saved session; do not reuse this state directory for other accounts")?;
     ensure!(
-        saved.homeserver == account.homeserver
-            && saved.session.meta.user_id.as_str() == account.user_id,
+        saved.homeserver == account.homeserver && saved.session.user_id() == account.user_id,
         "State directory belongs to another account/server; choose a different --state-dir"
     );
     Ok(Some(saved))
@@ -142,20 +179,73 @@ async fn authenticate(
     saved: Option<SavedSession>,
 ) -> Result<()> {
     if let Some(saved) = saved {
-        client.restore_session(saved.session).await.context("Restore persistent Matrix device")?;
-    } else {
-        let password = secret(&account.password_env)?;
+        install_session_callbacks(client, account, path)?;
         client
-            .matrix_auth()
-            .login_username(&account.user_id, &password)
-            .initial_device_display_name("Matrix account migration")
+            .restore_session(saved.session.into_session())
             .await
-            .with_context(|| {
-                format!("Login {}; check password and password-login support", account.user_id)
-            })?;
-        let session = client.matrix_auth().session().context("Login returned no session")?;
-        write_json(path, &SavedSession { homeserver: account.homeserver.clone(), session })?;
+            .context("Restore persistent Matrix device")?;
+        validate_identity(client, account).await?;
+    } else {
+        if let Some(name) = &account.password_env {
+            let password = secret(name)?;
+            client
+                .matrix_auth()
+                .login_username(&account.user_id, &password)
+                .initial_device_display_name("Matrix account migration")
+                .request_refresh_token()
+                .await
+                .with_context(|| {
+                    format!("Login {}; check password and password-login support", account.user_id)
+                })?;
+        } else {
+            crate::browser::login(client, account).await?;
+            crate::browser::confirm_identity(client, account).await?;
+        }
+        validate_identity(client, account).await?;
+        save(client, account, path)?;
+        install_session_callbacks(client, account, path)?;
     }
+    Ok(())
+}
+
+/// Persist complete Matrix/OAuth state without discarding refresh tokens or registration.
+pub fn save(client: &Client, account: &Account, path: &Path) -> Result<()> {
+    let session = client.session().context("Login returned no session")?;
+    ensure!(
+        session.meta().user_id.as_str() == account.user_id,
+        "Refusing to persist an unexpected account identity"
+    );
+    let authentication = if let AuthSession::Matrix(session) = session {
+        SavedAuthentication::Matrix(session)
+    } else if let AuthSession::OAuth(session) = session {
+        SavedAuthentication::Oauth {
+            client_id: session.client_id.as_str().to_owned(),
+            user: session.user,
+        }
+    } else {
+        anyhow::bail!("Unsupported SDK authentication session");
+    };
+    write_json(
+        path,
+        &SavedSession { homeserver: account.homeserver.clone(), session: authentication },
+    )
+}
+
+fn install_session_callbacks(client: &Client, account: &Account, path: &Path) -> Result<()> {
+    let reload_account = account.clone();
+    let reload_path = path.to_owned();
+    let save_account = account.clone();
+    let save_path = path.to_owned();
+    client
+        .set_session_callbacks(
+            Box::new(move |_| {
+                let saved = read_saved(&reload_account, &reload_path)?
+                    .context("Session file missing during token refresh")?;
+                Ok(saved.session.tokens())
+            }),
+            Box::new(move |client| save(&client, &save_account, &save_path).map_err(Into::into)),
+        )
+        .context("Install atomic session persistence callbacks")?;
     Ok(())
 }
 

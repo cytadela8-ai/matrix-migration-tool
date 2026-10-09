@@ -6,9 +6,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use matrix_migration_tool::{
     config::{Config, secret},
-    crypto, migration,
+    crypto, migration, prompt,
     report::Report,
-    session,
+    session, setup,
 };
 
 #[derive(Parser)]
@@ -27,6 +27,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Interactively create/resume config, browser sessions and encrypted-key access.
+    Init,
     /// Invite/join, increase power, merge metadata, transfer keys and audit history.
     Migrate {
         #[arg(long, default_value = "migration-report.json")]
@@ -41,8 +43,7 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -50,7 +51,7 @@ async fn main() -> ExitCode {
         )
         .with_writer(std::io::stderr)
         .init();
-    match execute(Cli::parse()).await {
+    match run_cli(Cli::parse()) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             tracing::error!("{error:#}");
@@ -59,10 +60,30 @@ async fn main() -> ExitCode {
     }
 }
 
+fn run_cli(cli: Cli) -> Result<u8> {
+    let _terminal = prompt::TerminalMode::capture()?;
+    let runtime = tokio::runtime::Runtime::new().context("Start async runtime")?;
+    let result = runtime.block_on(execute(cli));
+    // Cancelled terminal readers may still block in the OS; never hang shutdown on stdin.
+    runtime.shutdown_timeout(std::time::Duration::from_millis(100));
+    result
+}
+
 async fn execute(cli: Cli) -> Result<u8> {
+    if let Command::Init = cli.command {
+        tokio::select! {
+            result = setup::run(&cli.config, &cli.state_dir) => result?,
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("Listen for interruption")?;
+                anyhow::bail!("Setup interrupted; rerun init with the same paths to resume");
+            }
+        }
+        return Ok(0);
+    }
     let config = Config::read(&cli.config)?;
     let _lock = session::lock_state(&cli.state_dir)?;
     match cli.command {
+        Command::Init => unreachable!("init handled before reading config"),
         Command::Migrate { report } => migrate_command(&config, &cli.state_dir, &report).await,
         Command::ExportKeys { output, passphrase_env } => {
             export_command(&config, &cli.state_dir, &output, &passphrase_env).await
@@ -104,8 +125,12 @@ async fn export_command(
     output: &std::path::Path,
     passphrase_env: &str,
 ) -> Result<u8> {
-    let store_passphrase = secret(&config.store_passphrase_env)?;
-    let passphrase = secret(passphrase_env)?;
+    let store_passphrase = config.store_passphrase().await?;
+    let passphrase = if std::env::var_os(passphrase_env).is_some() {
+        secret(passphrase_env)?
+    } else {
+        prompt::hidden("Encrypted key export passphrase:").await?
+    };
     let client = session::login(&config.to, &state.join("to"), &store_passphrase).await?;
     let changed = crypto::export(&client, output, &passphrase).await?;
     tracing::info!(path = %output.display(), changed, "Encrypted key export ready");

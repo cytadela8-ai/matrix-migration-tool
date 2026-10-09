@@ -1,4 +1,5 @@
-//! Configuration stores secret environment-variable names rather than secret values.
+//! Configuration contains identities and optional secret environment-variable names.
+//! Wizard-created configs omit credential names and use browser sessions/terminal unlocking.
 
 use std::{env, path::Path};
 
@@ -12,14 +13,15 @@ use zeroize::Zeroizing;
 pub struct Account {
     pub homeserver: String,
     pub user_id: String,
-    pub password_env: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification_device: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_key_env: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_keys: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_passphrase_env: Option<String>,
 }
 
@@ -28,10 +30,18 @@ pub struct Account {
 pub struct Config {
     pub from: Account,
     pub to: Account,
-    pub store_passphrase_env: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_passphrase_env: Option<String>,
 }
 
 impl Config {
+    /// Unlock stores from an explicit environment variable or a hidden terminal prompt.
+    pub async fn store_passphrase(&self) -> Result<Zeroizing<String>> {
+        if let Some(name) = &self.store_passphrase_env {
+            return secret(name);
+        }
+        crate::prompt::hidden("Local store passphrase:").await
+    }
     /// Read a config and reject account ambiguity before contacting either server.
     ///
     /// Args:
