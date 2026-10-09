@@ -18,6 +18,46 @@ fn help_and_invalid_arguments_have_expected_exit_codes() {
 }
 
 #[test]
+fn init_is_discoverable_and_refuses_noninteractive_input_without_writes() {
+    let output = cli().args(["init", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("browser"));
+    let directory = TempDir::new().unwrap();
+    let config = directory.path().join("config.toml");
+    let state = directory.path().join("state");
+    let output = cli()
+        .arg("--config")
+        .arg(&config)
+        .arg("--state-dir")
+        .arg(&state)
+        .arg("init")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires a terminal"));
+    assert!(!config.exists());
+    assert!(!state.exists());
+}
+
+#[test]
+fn init_preserves_existing_configuration_when_input_is_unavailable() {
+    let directory = TempDir::new().unwrap();
+    let config = directory.path().join("config.toml");
+    let original = "user configuration, must not replace";
+    std::fs::write(&config, original).unwrap();
+    let output = cli()
+        .arg("--config")
+        .arg(&config)
+        .arg("--state-dir")
+        .arg(directory.path().join("state"))
+        .arg("init")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(std::fs::read_to_string(config).unwrap(), original);
+}
+
+#[test]
 fn invalid_config_fails_before_creating_state() {
     let directory = TempDir::new().unwrap();
     let config = directory.path().join("config.toml");
@@ -63,7 +103,8 @@ fn saved_account_mismatch_is_rejected_before_network_login() {
     std::fs::write(&config, include_str!("../config.toml.example")).unwrap();
     let account = directory.path().join("state/from");
     std::fs::create_dir_all(&account).unwrap();
-    let session = serde_json::json!({"homeserver": "https://other.example", "session": {
+    let session = serde_json::json!({"homeserver": "https://other.example",
+        "session": {
         "user_id": "@someone:other.example", "device_id": "OTHER_DEVICE",
         "access_token": "test-only-never-use-this-token"
     }});

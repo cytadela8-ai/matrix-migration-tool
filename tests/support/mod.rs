@@ -144,7 +144,7 @@ impl Server {
         Account {
             homeserver: self.url.clone(),
             user_id: format!("@{name}:{}", self.name),
-            password_env: password_env.into(),
+            password_env: Some(password_env.into()),
             verification_device: None,
             recovery_key_env: None,
             import_keys: None,

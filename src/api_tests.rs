@@ -6,7 +6,6 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
-use zeroize::Zeroizing;
 
 async fn server(responses: Vec<(u16, &str)>) -> (Api, tokio::task::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -16,24 +15,56 @@ async fn server(responses: Vec<(u16, &str)>) -> (Api, tokio::task::JoinHandle<Ve
     let task = tokio::spawn(async move {
         let mut requests = Vec::new();
         for (status, body) in responses {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut bytes = vec![0; 8192];
-            let count = socket.read(&mut bytes).await.unwrap();
-            requests.push(String::from_utf8_lossy(&bytes[..count]).into_owned());
-            let response = format!(
-                concat!(
-                    "HTTP/1.1 {} Test\r\nContent-Type: application/json\r\n",
-                    "Content-Length: {}\r\nConnection: close\r\n\r\n{}"
-                ),
-                status,
-                body.len(),
-                body
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = vec![0; 8192];
+                let count = socket.read(&mut bytes).await.unwrap();
+                let request = String::from_utf8_lossy(&bytes[..count]).into_owned();
+                let background = request.contains("/_matrix/client/v3/room_keys/version")
+                    || request.contains("/_matrix/client/v3/user/@test:example.org/account_data/");
+                let (reply_status, reply_body) = if background {
+                    (404, r#"{"errcode":"M_NOT_FOUND"}"#)
+                } else {
+                    (status, body.as_str())
+                };
+                let response = format!(
+                    concat!(
+                        "HTTP/1.1 {} Test\r\nContent-Type: application/json\r\n",
+                        "Content-Length: {}\r\nConnection: close\r\n\r\n{}"
+                    ),
+                    reply_status,
+                    reply_body.len(),
+                    reply_body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                if !background {
+                    requests.push(request);
+                    break;
+                }
+            }
         }
         requests
     });
-    (Api { http: Client::new(), base, token: Zeroizing::new("test-only-token".into()) }, task)
+    let client = matrix_sdk::Client::builder()
+        .homeserver_url(base.as_str())
+        .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_15])
+        .build()
+        .await
+        .unwrap();
+    client
+        .restore_session(matrix_sdk::authentication::matrix::MatrixSession {
+            meta: matrix_sdk::SessionMeta {
+                user_id: matrix_sdk::ruma::UserId::parse("@test:example.org").unwrap(),
+                device_id: "TEST".into(),
+            },
+            tokens: matrix_sdk::authentication::SessionTokens {
+                access_token: "test-only-token".into(),
+                refresh_token: None,
+            },
+        })
+        .await
+        .unwrap();
+    (Api { http: Client::new(), base, client }, task)
 }
 
 #[tokio::test]
@@ -94,4 +125,18 @@ async fn network_errors_have_operation_context() {
             .to_string()
             .contains("GET /_matrix/client/v3/unreachable")
     );
+}
+
+#[tokio::test]
+async fn refresh_failures_are_actionable_and_other_auth_errors_are_not_retried() {
+    let expired = r#"{"errcode":"M_UNKNOWN_TOKEN","error":"Expired"}"#;
+    let (api, task) = server(vec![(401, expired)]).await;
+    let error = api.get(&["expired"]).await.unwrap_err();
+    assert!(error.to_string().contains("Refresh expired session"));
+    assert!(!format!("{error:#}").contains("test-only-token"));
+    assert_eq!(task.await.unwrap().len(), 1);
+    let forbidden = r#"{"errcode":"M_FORBIDDEN","error":"Denied"}"#;
+    let (api, task) = server(vec![(401, forbidden)]).await;
+    assert!(api.get(&["denied"]).await.unwrap_err().to_string().contains("M_FORBIDDEN"));
+    assert_eq!(task.await.unwrap().len(), 1);
 }

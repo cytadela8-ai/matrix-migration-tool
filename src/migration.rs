@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     api::Api,
-    config::{Config, secret},
+    config::Config,
     crypto, history, policy,
     report::{Outcome, Report, RoomReport},
     session,
@@ -50,7 +50,7 @@ struct Connections {
 impl Connections {
     async fn open(config: &Config, state: &Path, report: &mut Report) -> Result<Self> {
         config.validate()?;
-        let passphrase = secret(&config.store_passphrase_env)?;
+        let passphrase = config.store_passphrase().await?;
         let from = session::Connected::open(&config.from, &state.join("from"), &passphrase).await?;
         report.from_device = from.client.device_id().map(ToString::to_string);
         report.from_rooms = joined_rooms(&from.api).await?;

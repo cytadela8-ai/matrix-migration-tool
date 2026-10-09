@@ -21,7 +21,7 @@ jobs:
         run: rustup show
       - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: Check Rust function and complexity limits
+      - name: Check Rust parameters and source width
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
